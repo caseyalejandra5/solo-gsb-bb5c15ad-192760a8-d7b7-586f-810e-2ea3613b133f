@@ -93,6 +93,24 @@ const els = {
   fixPropSelect: $('#fix-prop'),
   btnFixRun: $('#btn-fix-run'),
   fixResult: $('#fix-result'),
+  // 交接双方签收
+  signDialog: $('#sign-dialog'),
+  signForm: $('#sign-form'),
+  signRecordInfo: $('#sign-record-info'),
+  signSides: $('#sign-sides'),
+  // 已核实交接链
+  btnVerifiedChain: $('#btn-verified-chain'),
+  vchainDialog: $('#vchain-dialog'),
+  vchainForm: $('#vchain-form'),
+  vchainPropSelect: $('#vchain-prop-select'),
+  vchainMinuteInput: $('#vchain-minute-input'),
+  vchainPanel: $('#vchain-panel'),
+  vchainProp: $('#vchain-prop'),
+  vchainMinute: $('#vchain-minute'),
+  vchainSummary: $('#vchain-summary'),
+  vchainBlocked: $('#vchain-blocked'),
+  vchainChain: $('#vchain-chain'),
+  btnVchainClose: $('#btn-vchain-close'),
 };
 
 const STATUS_TEXT = {
@@ -302,9 +320,26 @@ function conflictRecordIds() {
   return set;
 }
 
+// 记录行的签收状态单元格：交 / 接两枚状态签 + 签收按钮
+function signCellHtml(r) {
+  const st = state.recordSignoffs ? state.recordSignoffs[r.id] : null;
+  const chip = (side, label) => {
+    const s = st ? st[side] : null;
+    if (!s || s.status === 'UNSIGNED') {
+      return `<span class="sign-chip sign-none" title="${label}未签收">${label} 未签</span>`;
+    }
+    if (s.status === 'STALE') {
+      return `<span class="sign-chip sign-stale" title="记录已修改，${label}此前的签收已失效，需重新签收">${label} 失效</span>`;
+    }
+    return `<span class="sign-chip sign-ok" title="${label}已签收">${label} ✓</span>`;
+  };
+  return `${chip('from', '交出者')}${chip('to', '接收者')}` +
+    `<button class="btn btn-sm" data-sign-record="${esc(r.id)}" title="双方签收确认">签收</button>`;
+}
+
 function renderRecordTable() {
   if (state.records.length === 0) {
-    els.recordTableBody.innerHTML = `<tr><td colspan="6" class="empty">还没有交接记录，点击右上角「录入交接记录」开始</td></tr>`;
+    els.recordTableBody.innerHTML = `<tr><td colspan="7" class="empty">还没有交接记录，点击右上角「录入交接记录」开始</td></tr>`;
     return;
   }
   const propName = (id) => {
@@ -323,6 +358,7 @@ function renderRecordTable() {
       <td>${esc(r.from)}</td>
       <td>${esc(r.to)}</td>
       <td>${esc(r.note)}</td>
+      <td class="col-sign">${signCellHtml(r)}</td>
       <td class="col-actions">
         <button class="btn btn-sm" data-edit-record="${esc(r.id)}">修改</button>
         <button class="btn btn-sm btn-danger" data-del-record="${esc(r.id)}">删除</button>
@@ -492,6 +528,17 @@ function bindEvents() {
     }
   });
 
+  // 交接双方签收（弹窗内按钮动态渲染，提交走事件委托）
+  els.signForm.addEventListener('submit', (e) => e.preventDefault());
+
+  // 已核实交接链（只读）
+  els.btnVerifiedChain.addEventListener('click', openVchainDialog);
+  els.vchainForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    submitVchain();
+  });
+  els.btnVchainClose.addEventListener('click', () => els.vchainPanel.classList.add('hidden'));
+
   // 批量交接预演
   els.btnBatch.addEventListener('click', openBatchDialog);
   els.btnBatchAddRow.addEventListener('click', () => {
@@ -582,6 +629,16 @@ function bindEvents() {
     if (editRecord) {
       const r = state.records.find((x) => x.id === editRecord.dataset.editRecord);
       if (r) openRecordDialog(r);
+      return;
+    }
+    const signRecord = t.closest?.('[data-sign-record]');
+    if (signRecord) {
+      openSignDialog(signRecord.dataset.signRecord);
+      return;
+    }
+    const signSide = t.closest?.('[data-sign-side]');
+    if (signSide) {
+      submitSign(signSide.dataset.signSide);
       return;
     }
     const delRecord = t.closest?.('[data-del-record]');
@@ -1297,6 +1354,176 @@ async function runConflictFix() {
     renderFixResult(data);
   } catch (err) {
     els.fixResult.innerHTML = `<div class="banner banner-error">${esc(err.message)}</div>`;
+    toast(err.message, true);
+  }
+}
+
+/* ==================== 交接双方签收 ==================== */
+
+let signingRecordId = null; // 当前签收弹窗对应的记录 id
+
+function fmtTime(ts) {
+  return new Date(ts).toLocaleString('zh-CN', { hour12: false });
+}
+
+function openSignDialog(recordId) {
+  if (!state.records.some((x) => x.id === recordId)) return;
+  signingRecordId = recordId;
+  renderSignDialog();
+  els.signDialog.showModal();
+}
+
+// 弹窗内容按最新 state 重绘：每次签收成功 / 检测到记录变化后调用
+function renderSignDialog() {
+  const r = state.records.find((x) => x.id === signingRecordId);
+  if (!r) {
+    els.signDialog.close();
+    return;
+  }
+  const st = state.recordSignoffs[r.id];
+  const prop = state.props.find((p) => p.id === r.propId);
+  els.signRecordInfo.innerHTML =
+    `第<strong>${r.minute}</strong>分钟 · <strong>${esc(prop ? prop.name : r.propId)}</strong>：` +
+    `${esc(r.from)} → ${esc(r.to)}${r.note ? `（${esc(r.note)}）` : ''}`;
+
+  els.signSides.innerHTML = ['from', 'to'].map((side) => {
+    const label = side === 'from' ? '交出者' : '接收者';
+    const expected = side === 'from' ? r.from : r.to;
+    const s = st[side];
+    if (s.status === 'VALID') {
+      return `<div class="sign-side">
+        <div class="sign-side-head">${label} <span class="inv-badge inv-ok">✓ 已签收</span></div>
+        <div class="sign-side-note">「${esc(s.signoff.name)}」已于 ${fmtTime(s.signoff.signedAt)} 确认本条记录内容。</div>
+      </div>`;
+    }
+    const staleNote = s.status === 'STALE'
+      ? `<div class="sign-side-warn">记录内容已修改，「${esc(s.signoff.name)}」此前的签收已失效，需重新签收。</div>`
+      : '';
+    return `<div class="sign-side">
+      <div class="sign-side-head">${label} <span class="inv-badge inv-muted">未签收</span></div>
+      ${staleNote}
+      <div class="sign-side-form">
+        <input type="text" class="sign-name" data-side="${side}" maxlength="30" list="people-list"
+               placeholder="须为「${esc(expected)}」本人姓名" />
+        <button type="button" class="btn btn-sm btn-primary" data-sign-side="${side}">确认签收</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function submitSign(side) {
+  const r = state.records.find((x) => x.id === signingRecordId);
+  if (!r) return;
+  const input = els.signSides.querySelector(`.sign-name[data-side="${side}"]`);
+  const name = input ? input.value.trim() : '';
+  if (!name) {
+    toast('请输入签收姓名', true);
+    return;
+  }
+  // 携带当前记录内容指纹：服务端核对道具、分钟、双方姓名与备注一致后才写入
+  const fingerprint = state.recordSignoffs[r.id].fingerprint;
+  try {
+    await api(`/api/records/${encodeURIComponent(r.id)}/sign`, {
+      method: 'POST',
+      body: JSON.stringify({ side, name, fingerprint }),
+    });
+    await loadState(); // 刷新签收状态（不重开弹窗）
+    renderSignDialog();
+    toast('签收成功，该侧确认已保存');
+  } catch (err) {
+    // 过期页面（记录已被编辑 / 删除）：刷新数据并重绘弹窗，提示重新核对
+    await loadState().catch(() => {});
+    if (els.signDialog.open) renderSignDialog();
+    toast(err.message, true);
+  }
+}
+
+/* ==================== 已核实交接链（只读） ==================== */
+
+function openVchainDialog() {
+  if (state.props.length === 0) {
+    toast('请先录入道具，再查询已核实交接链', true);
+    return;
+  }
+  els.vchainPropSelect.innerHTML = state.props
+    .map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`)
+    .join('');
+  els.vchainMinuteInput.value = state.verification.endMinute || 0;
+  els.vchainDialog.showModal();
+}
+
+function renderVchainResult(result) {
+  els.vchainProp.textContent = result.propName;
+  els.vchainMinute.textContent = result.cutoffMinute;
+
+  const chips = [
+    [`已核实 ${result.verifiedCount} 条`, result.verifiedCount > 0 ? 'chip-ok' : ''],
+    [`截止分钟内共 ${result.consideredCount} 条记录`, ''],
+    [`最后已核实持有人：${result.holder}`, result.holder === state.warehouse ? 'chip-neutral' : 'chip-ok'],
+    ...(result.returned ? [['已归仓', 'chip-ok']] : []),
+    ...(result.laterCount > 0 ? [[`截止后另有 ${result.laterCount} 条未参与`, 'chip-muted']] : []),
+    ...(result.blocked ? [['链被阻断', 'chip-bad']] : []),
+  ];
+  els.vchainSummary.innerHTML = chips
+    .map(([text, cls]) => `<span class="inv-chip ${cls}">${esc(text)}</span>`)
+    .join('');
+
+  if (result.blocked) {
+    const b = result.blocked;
+    const links = b.records
+      .map((id) => `<a data-record-id="${esc(id)}">记录 ${shortId(id)}</a>`)
+      .join('、');
+    const headText = b.type === 'MISSING_SIGNOFF'
+      ? '阻断原因：首条可接续记录缺少双方有效签收'
+      : '阻断原因：与原有交接链冲突';
+    els.vchainBlocked.innerHTML = `
+      <div class="conflict-box">
+        <div class="conflict-head">${headText} · 第${b.minute}分钟</div>
+        <div>${esc(b.reason)}</div>
+        <div style="margin-top:4px">
+          阻断记录：${links}（点击在右下记录表中定位）；此前最后已核实持有人：「${esc(result.holder)}」，
+          阻断之后的记录不计入已核实。
+        </div>
+      </div>`;
+  } else {
+    els.vchainBlocked.innerHTML =
+      `<div class="banner banner-ok">截止第 ${result.cutoffMinute} 分钟，已核实链完整延伸，未被阻断。</div>`;
+  }
+
+  const nodes = [`<span class="chain-node">${esc(state.warehouse)}</span>`];
+  result.chain.forEach((r) => {
+    nodes.push(
+      `<span class="chain-arrow">→</span><span class="chain-node">${esc(r.to)}</span>` +
+      `<span class="chain-meta">[第${r.minute}分 · 双方已签 · ${shortId(r.id)}]</span>`
+    );
+  });
+  els.vchainChain.innerHTML =
+    `<div class="resp-section-title">已核实交接链（${result.verifiedCount} 条）</div>` +
+    `<div class="chain">${nodes.join(' ')}</div>`;
+
+  els.vchainPanel.classList.remove('hidden');
+  els.vchainPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+async function submitVchain() {
+  const propId = els.vchainPropSelect.value;
+  const minute = Number(els.vchainMinuteInput.value);
+  if (!propId) {
+    toast('请选择道具', true);
+    return;
+  }
+  if (!Number.isInteger(minute) || minute < 0) {
+    toast('截止分钟必须是不小于 0 的整数', true);
+    return;
+  }
+  try {
+    const result = await api(
+      `/api/verified-chain?prop=${encodeURIComponent(propId)}&minute=${minute}`
+    );
+    els.vchainDialog.close();
+    renderVchainResult(result);
+    toast('已核实交接链查询完成（只读，未改动任何数据）');
+  } catch (err) {
     toast(err.message, true);
   }
 }

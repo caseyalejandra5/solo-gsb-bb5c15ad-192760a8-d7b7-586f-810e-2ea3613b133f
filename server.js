@@ -10,6 +10,12 @@ const { previewBatch, hashRows } = require('./src/batch');
 const { buildResponsibilitySheet } = require('./src/responsibility');
 const { checkAppearances } = require('./src/appearance');
 const { previewConflictFix } = require('./src/conflict-fix');
+const {
+  SIDE,
+  recordFingerprint,
+  recordSignoffStatus,
+  buildVerifiedChain,
+} = require('./src/signoff');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -42,9 +48,14 @@ function asyncRoute(handler) {
 /* ---------------- 读取 / 核验 ---------------- */
 
 app.get('/api/state', (req, res) => {
-  // data 自带 rev（数据版本号），一并下发供批量预演核对
+  // data 自带 rev（数据版本号）与 signoffs（签收记录），一并下发；
+  // recordSignoffs 为每条记录的双方签收状态与当前内容指纹，供页面签收时携带核对
   const data = store.getData();
-  res.json({ warehouse: store.WAREHOUSE, ...data, verification: verifyAll(data) });
+  const recordSignoffs = {};
+  for (const r of data.records) {
+    recordSignoffs[r.id] = { fingerprint: recordFingerprint(r), ...recordSignoffStatus(r, data.signoffs) };
+  }
+  res.json({ warehouse: store.WAREHOUSE, ...data, recordSignoffs, verification: verifyAll(data) });
 });
 
 app.get('/api/verify', (req, res) => {
@@ -210,11 +221,16 @@ app.delete('/api/props/:id', (req, res) => {
   if (!data.props.some((p) => p.id === req.params.id)) {
     return res.status(404).json({ error: '道具不存在' });
   }
-  // 删除道具时级联删除其全部交接记录
+  // 删除道具时级联删除其全部交接记录与对应签收记录
+  const removedRecordIds = new Set(
+    data.records.filter((r) => r.propId === req.params.id).map((r) => r.id)
+  );
   const props = data.props.filter((p) => p.id !== req.params.id);
   const records = data.records.filter((r) => r.propId !== req.params.id);
+  const signoffs = (data.signoffs || []).filter((s) => !removedRecordIds.has(s.recordId));
   store.saveProps(props);
   store.saveRecords(records);
+  if (signoffs.length !== (data.signoffs || []).length) store.saveSignoffs(signoffs);
   res.status(204).end();
 });
 
@@ -276,7 +292,90 @@ app.delete('/api/records/:id', (req, res) => {
     return res.status(404).json({ error: '记录不存在' });
   }
   store.saveRecords(data.records.filter((r) => r.id !== req.params.id));
+  // 删除记录时级联清理其签收记录
+  const signoffs = (data.signoffs || []).filter((s) => s.recordId !== req.params.id);
+  if (signoffs.length !== (data.signoffs || []).length) store.saveSignoffs(signoffs);
   res.status(204).end();
+});
+
+/* ---------------- 交接双方签收（写入，逐侧独立持久保存） ---------------- */
+
+// 签收确认：页面携带当前记录内容指纹，服务端核对道具、分钟、双方姓名与备注后才写入；
+// 记录被编辑后指纹改变，旧签收立即失效，过期页面的确认请求返回 409 拒绝。
+app.post('/api/records/:id/sign', asyncRoute((req, res) => {
+  const data = store.getData();
+  const record = data.records.find((r) => r.id === req.params.id);
+  if (!record) return res.status(404).json({ error: '记录不存在或已被删除，请刷新后重试' });
+
+  const body = req.body || {};
+  let side;
+  let name;
+  let fingerprint;
+  try {
+    side = nonEmpty(body.side, '签收方');
+    if (![SIDE.FROM, SIDE.TO].includes(side)) {
+      throw new Error('签收方必须是 from（交出者）或 to（接收者）');
+    }
+    name = nonEmpty(body.name, '签收姓名');
+    if (name.length > 30) throw new Error('签收姓名最长 30 个字符');
+    fingerprint = nonEmpty(body.fingerprint, '记录内容指纹');
+  } catch (err) {
+    return badRequest(res, err.message);
+  }
+
+  // 姓名须匹配该条记录的对应角色
+  const expected = side === SIDE.FROM ? record.from : record.to;
+  if (name !== expected) {
+    return badRequest(
+      res,
+      `签收姓名与记录不符：该记录的${side === SIDE.FROM ? '交出者' : '接收者'}为「${expected}」`
+    );
+  }
+
+  // 内容指纹核对：过期页面（记录已被编辑）的确认请求拒绝
+  const current = recordFingerprint(record);
+  if (fingerprint !== current) {
+    return res
+      .status(409)
+      .json({ error: '记录内容已变化（页面数据过期），请刷新后重新核对再签收', stale: true });
+  }
+
+  // 逐侧独立写入：同一侧重复签收时覆盖旧签收（以最新一次为准）
+  const signoff = {
+    id: store.newId('s'),
+    recordId: record.id,
+    side,
+    name,
+    fingerprint: current,
+    signedAt: Date.now(),
+  };
+  const signoffs = [
+    ...(data.signoffs || []).filter((s) => !(s.recordId === record.id && s.side === side)),
+    signoff,
+  ];
+  store.saveSignoffs(signoffs);
+  res.status(201).json(signoff);
+}));
+
+/* ---------------- 已核实交接链（只读，即时重放，不改写任何数据） ---------------- */
+
+app.get('/api/verified-chain', (req, res) => {
+  const data = store.getData();
+  let propKey;
+  let minute;
+  try {
+    propKey = nonEmpty(req.query.prop, '道具');
+    minute = parseMinute(req.query.minute, '截止分钟');
+  } catch (err) {
+    return badRequest(res, err.message);
+  }
+
+  // 道具参数支持 id 或名称（名称精确匹配）
+  const prop = data.props.find((p) => p.id === propKey) || data.props.find((p) => p.name === propKey);
+  if (!prop) return res.status(404).json({ error: `道具「${propKey}」不存在` });
+
+  // 纯读取 + 即时重放，不写入任何数据
+  res.json(buildVerifiedChain(data, prop, minute));
 });
 
 /* ---------------- 批量交接预演（预演不落盘，提交一次写入） ---------------- */

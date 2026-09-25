@@ -52,7 +52,24 @@ function seedData() {
     { id: 'r_se1', propId: 'p_seal', minute: 1, from: WAREHOUSE, to: '周八', note: '', createdAt: now },
     { id: 'r_se2', propId: 'p_seal', minute: 6, from: '周八', to: '孙七', note: '', createdAt: now + 1 },
   ];
-  return { version: 1, rev: 0, props, records };
+
+  // 演示签收（延迟加载避免循环依赖：signoff -> verify -> store）：
+  // 青龙剑四条记录双方均已签收（已核实链可完整重放至归仓）；
+  // 御印第 1 条双方签收、第 2 条仅交出者签收（已核实链在第 6 分钟缺签处阻断）
+  const { recordFingerprint } = require('./signoff');
+  const signoffs = [];
+  const signBoth = (r, at) => {
+    signoffs.push(
+      { id: `s_${r.id}_from`, recordId: r.id, side: 'from', name: r.from, fingerprint: recordFingerprint(r), signedAt: at },
+      { id: `s_${r.id}_to`, recordId: r.id, side: 'to', name: r.to, fingerprint: recordFingerprint(r), signedAt: at + 1 }
+    );
+  };
+  records.filter((r) => r.propId === 'p_sword').forEach((r, i) => signBoth(r, now + 1000 + i * 2));
+  signBoth(records.find((r) => r.id === 'r_se1'), now + 2000);
+  const se2 = records.find((r) => r.id === 'r_se2');
+  signoffs.push({ id: 's_r_se2_from', recordId: 'r_se2', side: 'from', name: se2.from, fingerprint: recordFingerprint(se2), signedAt: now + 2100 });
+
+  return { version: 1, rev: 0, props, records, signoffs };
 }
 
 function ensureLoaded() {
@@ -74,6 +91,8 @@ function ensureLoaded() {
       }
       // 数据版本号：每次落盘自增，批量预演以此核对数据是否在预演后被修改
       if (typeof parsed.rev !== 'number') parsed.rev = 0;
+      // 旧数据文件无签收集合时补空数组（迁移不立即落盘，随下次写入生效）
+      if (!Array.isArray(parsed.signoffs)) parsed.signoffs = [];
       cache = parsed;
     } catch (err) {
       const backup = `${DATA_FILE}.corrupt.${Date.now()}`;
@@ -107,10 +126,16 @@ function saveRecords(records) {
   persist();
 }
 
+function saveSignoffs(signoffs) {
+  cache.signoffs = signoffs;
+  persist();
+}
+
 module.exports = {
   WAREHOUSE,
   newId,
   getData,
   saveProps,
   saveRecords,
+  saveSignoffs,
 };
