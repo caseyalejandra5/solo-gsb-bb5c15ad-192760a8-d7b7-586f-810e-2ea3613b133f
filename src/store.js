@@ -52,7 +52,7 @@ function seedData() {
     { id: 'r_se1', propId: 'p_seal', minute: 1, from: WAREHOUSE, to: '周八', note: '', createdAt: now },
     { id: 'r_se2', propId: 'p_seal', minute: 6, from: '周八', to: '孙七', note: '', createdAt: now + 1 },
   ];
-  return { version: 1, rev: 0, props, records };
+  return { version: 1, rev: 0, props, records, signoffs: [] };
 }
 
 function ensureLoaded() {
@@ -74,6 +74,8 @@ function ensureLoaded() {
       }
       // 数据版本号：每次落盘自增，批量预演以此核对数据是否在预演后被修改
       if (typeof parsed.rev !== 'number') parsed.rev = 0;
+      // 签收列表：旧数据文件可能没有该字段，默认为空
+      if (!Array.isArray(parsed.signoffs)) parsed.signoffs = [];
       cache = parsed;
     } catch (err) {
       const backup = `${DATA_FILE}.corrupt.${Date.now()}`;
@@ -107,10 +109,16 @@ function saveRecords(records) {
   persist();
 }
 
+function saveSignoffs(signoffs) {
+  cache.signoffs = signoffs;
+  persist();
+}
+
 module.exports = {
   WAREHOUSE,
   newId,
   getData,
   saveProps,
   saveRecords,
+  saveSignoffs,
 };

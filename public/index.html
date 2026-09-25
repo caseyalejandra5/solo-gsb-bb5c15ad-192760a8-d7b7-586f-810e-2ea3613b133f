@@ -24,6 +24,7 @@
         <button id="btn-responsibility" class="btn">📋 人员交接责任单</button>
         <button id="btn-appearance" class="btn">🎭 出场时段核对</button>
         <button id="btn-conflict-fix" class="btn btn-accent">🛠 冲突修复预演</button>
+        <button id="btn-verified-chain" class="btn">✅ 已核实交接链</button>
         <button id="btn-reverify" class="btn" title="重新读取记录并按时间重放">↻ 重新核验</button>
       </div>
     </div>
@@ -107,6 +108,18 @@
       </div>
     </section>
 
+    <!-- 已核实交接链结果（查询后即时展示，只读、不改写任何数据） -->
+    <section id="vchain-panel" class="panel panel-vchain hidden">
+      <div class="panel-head vchain-head">
+        <h2>✅ 已核实交接链 · <span id="vchain-prop-name">-</span> · 截止第 <span id="vchain-minute-label">-</span> 分钟（含）</h2>
+        <button type="button" class="btn btn-sm" id="btn-vchain-close" title="关闭结果">✕ 关闭</button>
+      </div>
+      <div class="inv-summary" id="vchain-summary"></div>
+      <div id="vchain-blocker" class="vchain-blocker"></div>
+      <div class="resp-section-title">已核实链（按同分钟唯一链重放顺序，双方签收齐全才计入）</div>
+      <div id="vchain-flow" class="vchain-flow"></div>
+    </section>
+
     <div class="grid">
       <!-- 左：核验结论与时间轴 -->
       <section class="panel panel-results">
@@ -138,6 +151,7 @@
             <thead>
               <tr>
                 <th>分钟</th><th>道具</th><th>交出者</th><th>接收者</th><th>备注</th>
+                <th class="col-sign">签收</th>
                 <th class="col-actions">操作</th>
               </tr>
             </thead>
@@ -330,6 +344,58 @@
       <div id="fix-result" class="fix-result"></div>
       <div class="dialog-actions">
         <button type="button" class="btn" data-close>关闭</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 交接双方签收弹窗 -->
+  <dialog id="signoff-dialog" class="dialog">
+    <form method="dialog" id="signoff-form">
+      <h3>交接双方签收</h3>
+      <p class="dialog-tip">
+        交出者与接收者<strong>分别输入自己的姓名</strong>确认本条交接：姓名须与记录中对应角色完全一致，
+        两侧签收状态互不影响并持久保存。提交时页面携带当前记录内容指纹，
+        服务端核对道具、分钟、双方姓名与备注一致后才写入；记录被修改或删除后，旧签收立即失效，
+        过期页面的确认请求会被拒绝。
+      </p>
+      <div id="signoff-record" class="signoff-record"></div>
+      <div id="signoff-status" class="signoff-status"></div>
+      <label class="field">
+        <span>签收方 <em>*</em></span>
+        <select id="signoff-side" required></select>
+      </label>
+      <label class="field">
+        <span>签收姓名（须与所选签收方一致） <em>*</em></span>
+        <input type="text" id="signoff-name" maxlength="30" required placeholder="输入与所选角色完全一致的姓名" />
+      </label>
+      <div class="dialog-actions">
+        <button type="button" class="btn" data-close>关闭</button>
+        <button type="submit" class="btn btn-primary" id="signoff-submit">确认签收</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 已核实交接链查询弹窗 -->
+  <dialog id="vchain-dialog" class="dialog">
+    <form method="dialog" id="vchain-form">
+      <h3>已核实交接链查询</h3>
+      <p class="dialog-tip">
+        选择道具与截止分钟（含）：服务端沿<strong>同分钟唯一链</strong>重放该分钟及以前的记录，
+        只有<strong>交出者与接收者均有效签收</strong>的记录才延伸已核实链；
+        遇首条缺签或原链冲突即停止，返回阻断记录与此前最后已核实持有人，
+        阻断之后的记录不计入已核实。查询只读，不改写任何数据。
+      </p>
+      <label class="field">
+        <span>道具 <em>*</em></span>
+        <select id="vchain-prop" required></select>
+      </label>
+      <label class="field">
+        <span>截止分钟（含） <em>*</em></span>
+        <input type="number" id="vchain-minute" min="0" step="1" required placeholder="如 12" />
+      </label>
+      <div class="dialog-actions">
+        <button type="button" class="btn" data-close>取消</button>
+        <button type="submit" class="btn btn-primary">查询已核实链</button>
       </div>
     </form>
   </dialog>
